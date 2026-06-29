@@ -246,10 +246,6 @@ export default function Home() {
 
   return (
     <div className="relative flex flex-col min-h-screen">
-      <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100vh', zIndex: 0 }}>
-        <SplineScene />
-        <div ref={overlayRef} style={{ position: 'absolute', inset: 0, background: '#0e0e0e', opacity: 0, pointerEvents: 'none' }} />
-      </div>
 
       <div className="relative flex flex-col min-h-screen" style={{ zIndex: 1 }}>
         {/* Navbar */}
@@ -257,12 +253,6 @@ export default function Home() {
           <div className="flex items-center gap-2.5">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/echoo.png" alt="Echoo" className="w-14 h-14 sm:w-20 sm:h-20 md:w-25 md:h-25 rounded-lg object-contain absolute left-4 sm:left-6" />
-          </div>
-
-          <div className="hidden md:flex items-center gap-7 absolute left-[50%] -translate-x-1/2">
-            {["Echoo", "API", "Company", "Careers", "Pricing"].map((link) => (
-              <a key={link} href="#" className="nav-link text-sm">{link}</a>
-            ))}
           </div>
 
           <div className="ml-auto">
@@ -341,25 +331,18 @@ export default function Home() {
             <div className="flex items-center justify-between px-4 py-3">
               <div className="flex items-center gap-2.5">
                 <button
+                  onClick={() => {
+                    if (isLoggedIn) {
+                      router.push('/posts');
+                    } else {
+                      router.push('/login?redirect=/posts');
+                    }
+                  }}
                   className="icon-btn w-7 h-7 rounded-full flex items-center justify-center transition-all"
                   style={{ background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.09)", color: "rgba(255,255,255,0.45)" }}
                 >
                   <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
                     <path d="M5.5 1v9M1 5.5h9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                  </svg>
-                </button>
-                <button className="icon-btn transition-all" style={{ color: "rgba(255,255,255,0.35)" }}>
-                  <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
-                    <path d="M2 13c1.5-1 3-3.5 3-5.5 0-1.1-.9-2-2-2s-2 .9-2 2c0 .55.22 1.05.59 1.41L2 10l1 3z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-                    <path d="M5 7.5L11 2l2 2-6 5.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
-                <button className="icon-btn transition-all" style={{ color: "rgba(255,255,255,0.35)" }}>
-                  <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
-                    <circle cx="7.5" cy="7.5" r="6" stroke="currentColor" strokeWidth="1.2" />
-                    <path d="M5 9.5s.9 1.2 2.5 1.2 2.5-1.2 2.5-1.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-                    <circle cx="5.5" cy="6.5" r="0.8" fill="currentColor" />
-                    <circle cx="9.5" cy="6.5" r="0.8" fill="currentColor" />
                   </svg>
                 </button>
               </div>
