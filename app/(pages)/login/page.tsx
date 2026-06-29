@@ -19,7 +19,7 @@ function LoginForm() {
 
   useEffect(() => {
     if (!isLoading && user) {
-      router.replace(redirectTo || (user.instagram_id ? "/posts" : "/oauth/instagram"));
+      router.replace(redirectTo || ((user.connected_accounts?.length ?? 0) > 0 ? "/posts" : "/connect"));
     }
   }, [user, isLoading, router, redirectTo]);
 
@@ -45,7 +45,7 @@ function LoginForm() {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/echoo.png" alt="Echoo" className="w-25 h-25 rounded-lg object-contain absolute" />
         </Link>
-        <Link href="/signup" className="try-btn px-3 sm:px-5 py-2 text-sm text-white rounded-full transition-all"
+        <Link href={`/signup${redirectTo ? `?redirect=${encodeURIComponent(redirectTo)}` : ''}`} className="try-btn px-3 sm:px-5 py-2 text-sm text-white rounded-full transition-all"
           style={{ background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.18)" }}>
           Sign up
         </Link>

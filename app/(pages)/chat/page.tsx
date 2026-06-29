@@ -12,7 +12,8 @@ type Mode = 'analysis' | 'listing'
 
 interface Source {
   id: string
-  instagram_comment_id: string
+  platform: string
+  external_comment_id: string
   username: string
   text: string
   posted_at: string
@@ -30,7 +31,9 @@ interface Message {
 
 interface SidebarPost {
   id: string
-  instagram_post_id: string
+  platform: string
+  instagram_post_id: string | null
+  youtube_video_id: string | null
   caption: string | null
   media_url: string | null
   comment_count: number
@@ -150,10 +153,13 @@ function ChatContent() {
         const filtered = parsed.filter(p => ids.includes(p.id))
         if (filtered.length > 0) return filtered
       }
-      // Fallback: localStorage cache
-      const cached = localStorage.getItem('echoo_all_posts')
-      if (!cached) return []
-      return (JSON.parse(cached) as SidebarPost[]).filter(p => ids.includes(p.id))
+      // Fallback: merge regular + external localStorage caches
+      const allCached: SidebarPost[] = []
+      try { const r = localStorage.getItem('echoo_all_posts'); if (r) allCached.push(...JSON.parse(r)) } catch {}
+      try { const e = localStorage.getItem('echoo_external_posts'); if (e) allCached.push(...JSON.parse(e)) } catch {}
+      const filtered = allCached.filter(p => ids.includes(p.id))
+      if (filtered.length > 0) return filtered
+      return []
     } catch { return [] }
   })
   const [expandedSources, setExpandedSources] = useState<Set<number>>(new Set())
@@ -166,6 +172,9 @@ function ChatContent() {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [syncingPosts, setSyncingPosts] = useState<Set<string>>(new Set())
   const [syncedPosts, setSyncedPosts] = useState<Set<string>>(new Set())
+  const [sidebarSection, setSidebarSection] = useState<'posts' | 'sessions' | 'accounts'>('posts')
+  const [sessions, setSessions] = useState<{ id: string; title: string; post_ids: string[]; created_at: string }[]>([])
+  const [messagesLoading, setMessagesLoading] = useState(() => !!searchParams.get('conversation_id'))
 
   const modeMenuRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -185,51 +194,86 @@ function ChatContent() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const hasSentInitialRef = useRef(false)
   const sendRef = useRef<(text: string) => void>(() => {})
-  const conversationIdRef = useRef<string | null>(null)
+  const conversationIdRef = useRef<string | null>(searchParams.get('conversation_id') || null)
 
   // Auth guards
   useEffect(() => {
     if (isLoading) return
     if (!user) { router.replace('/login?redirect=/chat'); return }
-    if (!user.instagram_id) { router.replace('/oauth/instagram'); return }
+    if ((user.connected_accounts?.length ?? 0) === 0) { router.replace('/connect'); return }
     if (postIds.length === 0) { router.replace('/posts'); return }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, isLoading])
 
+  // Load + refresh conversation sessions for sidebar history
+  const loadSessions = useCallback(() => {
+    fetch(`${API_BASE}/chat/conversations`, { credentials: 'include' })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then((data: { id: string; title: string; post_ids: string[]; created_at: string }[]) => {
+        const trimmed = data.slice(0, 30)
+        setSessions(trimmed)
+        try { localStorage.setItem('echoo_chat_history', JSON.stringify(trimmed)) } catch {}
+      })
+      .catch(() => {})
+  }, [])
 
-  // Seed syncingPosts from sidebar data; load sidebar from storage if initializer missed.
+  useEffect(() => {
+    if (!user) return
+    try {
+      const cached = localStorage.getItem('echoo_chat_history')
+      if (cached) setSessions(JSON.parse(cached))
+    } catch {}
+    loadSessions()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user])
+
+  // When navigating from home history: load existing conversation messages on mount
+  useEffect(() => {
+    const convId = searchParams.get('conversation_id')
+    if (!convId) return
+    setMessagesLoading(true)
+    fetch(`${API_BASE}/chat/conversations/${convId}/messages`, { credentials: 'include' })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then((msgs: { id: string; role: string; content: string }[]) => {
+        if (msgs.length === 0) return
+        setMessages(msgs.map(m => ({
+          role: (m.role === 'assistant' ? 'ai' : 'user') as 'ai' | 'user',
+          text: m.content,
+        })))
+        hasSentInitialRef.current = true
+      })
+      .catch(() => {})
+      .finally(() => setMessagesLoading(false))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Load sidebar post data from storage; fall back to a single server fetch on cache miss.
+  // Never auto-starts syncingPosts — the posts page guarantees sync is complete before
+  // navigating here. Manual re-sync uses the sidebar Sync button (syncPost()).
   useEffect(() => {
     if (postIds.length === 0) return
-    const seed = (list: SidebarPost[]) => {
-      const inProgress = new Set(
-        list.filter(p => p.sync_status === 'pending' || p.sync_status === 'syncing').map(p => p.instagram_post_id)
-      )
-      if (inProgress.size > 0) setSyncingPosts(inProgress)
-    }
-    if (sidebarPosts.length > 0) { seed(sidebarPosts); return }
+    if (sidebarPosts.length > 0) return
 
     // Lazy initializer might have missed (e.g. URL not yet set) — check storage here too
     try {
       const session = sessionStorage.getItem('echoo_selected_posts')
       if (session) {
         const filtered = (JSON.parse(session) as SidebarPost[]).filter(p => postIds.includes(p.id))
-        if (filtered.length > 0) { setSidebarPosts(filtered); seed(filtered); return }
+        if (filtered.length > 0) { setSidebarPosts(filtered); return }
       }
-      const cached = localStorage.getItem('echoo_all_posts')
-      if (cached) {
-        const filtered = (JSON.parse(cached) as SidebarPost[]).filter(p => postIds.includes(p.id))
-        if (filtered.length > 0) { setSidebarPosts(filtered); seed(filtered); return }
-      }
+      const allCached: SidebarPost[] = []
+      try { const r = localStorage.getItem('echoo_all_posts'); if (r) allCached.push(...JSON.parse(r)) } catch {}
+      try { const e = localStorage.getItem('echoo_external_posts'); if (e) allCached.push(...JSON.parse(e)) } catch {}
+      const filtered = allCached.filter(p => postIds.includes(p.id))
+      if (filtered.length > 0) { setSidebarPosts(filtered); return }
     } catch {}
 
-    // True cache miss — fetch from server as last resort
+    // True cache miss — fetch from server as last resort (one-shot, no poll)
     fetch(`${API_BASE}/posts`, { credentials: 'include' })
       .then(r => r.ok ? r.json() : Promise.reject())
       .then((data: SidebarPost[]) => {
         try { localStorage.setItem('echoo_all_posts', JSON.stringify(data)) } catch {}
-        const filtered = data.filter(p => postIds.includes(p.id))
-        setSidebarPosts(filtered)
-        seed(filtered)
+        setSidebarPosts(data.filter(p => postIds.includes(p.id)))
       })
       .catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -247,9 +291,9 @@ function ChatContent() {
           setSidebarPosts(filtered)
           const done = new Set<string>()
           filtered.forEach(p => {
-            if (syncingPosts.has(p.instagram_post_id) &&
+            if (syncingPosts.has(p.id) &&
                 p.sync_status !== 'pending' && p.sync_status !== 'syncing') {
-              done.add(p.instagram_post_id)
+              done.add(p.id)
             }
           })
           if (done.size > 0) {
@@ -349,6 +393,7 @@ function ChatContent() {
               updated[lastIdx] = { ...last, streaming: false, sources }
               return updated
             })
+            loadSessions() // refresh sidebar history after each reply
           },
         )
       }
@@ -391,50 +436,51 @@ function ChatContent() {
     })
   }
 
-  async function syncPost(instagram_post_id: string) {
-    if (syncingPosts.has(instagram_post_id)) return
-    setSyncingPosts(prev => new Set(prev).add(instagram_post_id))
+  async function syncPost(postDbId: string) {
+    if (syncingPosts.has(postDbId)) return
+    setSyncingPosts(prev => new Set(prev).add(postDbId))
     try {
       await fetch(`${API_BASE}/posts/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ post_ids: [instagram_post_id] }),
+        body: JSON.stringify({ post_ids: [postDbId] }),
       })
-      setSyncedPosts(prev => new Set(prev).add(instagram_post_id))
+      setSyncedPosts(prev => new Set(prev).add(postDbId))
       setTimeout(() => {
-        setSyncedPosts(prev => { const n = new Set(prev); n.delete(instagram_post_id); return n })
+        setSyncedPosts(prev => { const n = new Set(prev); n.delete(postDbId); return n })
       }, 2000)
     } catch {
       // silently fail
     } finally {
-      setSyncingPosts(prev => { const n = new Set(prev); n.delete(instagram_post_id); return n })
+      setSyncingPosts(prev => { const n = new Set(prev); n.delete(postDbId); return n })
     }
   }
 
-  async function sendReply(instagram_comment_id: string) {
-    const text = (replyText[instagram_comment_id] ?? '').trim()
+  async function sendReply(commentId: string) {
+    const text = (replyText[commentId] ?? '').trim()
     if (!text) return
-    setReplySending(prev => ({ ...prev, [instagram_comment_id]: true }))
+    setReplySending(prev => ({ ...prev, [commentId]: true }))
     try {
-      const res = await fetch(`${API_BASE}/comments/${instagram_comment_id}/reply`, {
+      const res = await fetch(`${API_BASE}/comments/${commentId}/reply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ message: text }),
       })
       if (!res.ok) throw new Error()
-      setReplySent(prev => ({ ...prev, [instagram_comment_id]: true }))
-      setReplyText(prev => ({ ...prev, [instagram_comment_id]: '' }))
-      setReplyOpen(prev => ({ ...prev, [instagram_comment_id]: false }))
+      setReplySent(prev => ({ ...prev, [commentId]: true }))
+      setReplyText(prev => ({ ...prev, [commentId]: '' }))
+      setReplyOpen(prev => ({ ...prev, [commentId]: false }))
     } catch {
       // keep open so user can retry
     } finally {
-      setReplySending(prev => ({ ...prev, [instagram_comment_id]: false }))
+      setReplySending(prev => ({ ...prev, [commentId]: false }))
     }
   }
 
   function newChat() {
+    if (isStreaming) return
     setMessages([])
     setInput('')
     setExpandedSources(new Set())
@@ -443,12 +489,59 @@ function ChatContent() {
     setReplySending({})
     setReplySent({})
     conversationIdRef.current = null
+    hasSentInitialRef.current = true // don't re-fire initial ?q= on new chat
+    const params = new URLSearchParams(searchParams.toString())
+    params.delete('conversation_id')
+    router.replace(`/chat?${params.toString()}`)
   }
 
-  if (!hasMounted || isLoading || !user || !user.instagram_id || postIds.length === 0) {
+  async function openSession(session: { id: string; title: string; post_ids: string[]; created_at: string }) {
+    if (isStreaming) return
+    setMessagesLoading(true)
+    try {
+      const r = await fetch(`${API_BASE}/chat/conversations/${session.id}/messages`, { credentials: 'include' })
+      if (!r.ok) return
+      const msgs: { id: string; role: string; content: string }[] = await r.json()
+      setMessages(msgs.map(m => ({
+        role: (m.role === 'assistant' ? 'ai' : 'user') as 'ai' | 'user',
+        text: m.content,
+      })))
+      setExpandedSources(new Set())
+      setReplyOpen({})
+      setReplyText({})
+      setReplySending({})
+      setReplySent({})
+      conversationIdRef.current = session.id
+      hasSentInitialRef.current = true
+      // Update sidebar posts from session's post_ids using cache (regular + external)
+      if (session.post_ids.length > 0) {
+        try {
+          const allCached: SidebarPost[] = []
+          try { const r = localStorage.getItem('echoo_all_posts'); if (r) allCached.push(...JSON.parse(r)) } catch {}
+          try { const e = localStorage.getItem('echoo_external_posts'); if (e) allCached.push(...JSON.parse(e)) } catch {}
+          const filtered = allCached.filter(p => session.post_ids.includes(p.id))
+          if (filtered.length > 0) setSidebarPosts(filtered)
+        } catch {}
+        router.replace(`/chat?posts=${session.post_ids.join(',')}&conversation_id=${session.id}`)
+      }
+    } catch {}
+    finally { setMessagesLoading(false) }
+  }
+
+  if (!hasMounted || isLoading || !user || (user.connected_accounts?.length ?? 0) === 0 || postIds.length === 0) {
     return (
       <div className="flex h-screen items-center justify-center" style={{ background: '#0e0e0e' }}>
         <div className="text-sm" style={{ color: 'rgba(255,255,255,0.35)' }}>Loading…</div>
+      </div>
+    )
+  }
+
+  if (messagesLoading) {
+    return (
+      <div className="flex flex-col h-screen items-center justify-center gap-4" style={{ background: '#0e0e0e' }}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/echoo.png" alt="Echoo" className="w-12 h-12 rounded-2xl object-contain animate-pulse" style={{ opacity: 0.7 }} />
+        <p className="text-sm" style={{ color: 'rgba(255,255,255,0.38)' }}>Loading chats…</p>
       </div>
     )
   }
@@ -461,11 +554,11 @@ function ChatContent() {
         const filtered = (JSON.parse(session) as SidebarPost[]).filter(p => postIds.includes(p.id))
         if (filtered.length > 0) return filtered
       }
-      const cached = localStorage.getItem('echoo_all_posts')
-      if (cached) {
-        const filtered = (JSON.parse(cached) as SidebarPost[]).filter(p => postIds.includes(p.id))
-        if (filtered.length > 0) return filtered
-      }
+      const allCached: SidebarPost[] = []
+      try { const r = localStorage.getItem('echoo_all_posts'); if (r) allCached.push(...JSON.parse(r)) } catch {}
+      try { const e = localStorage.getItem('echoo_external_posts'); if (e) allCached.push(...JSON.parse(e)) } catch {}
+      const filtered = allCached.filter(p => postIds.includes(p.id))
+      if (filtered.length > 0) return filtered
     } catch {}
     return []
   })()
@@ -489,98 +582,223 @@ function ChatContent() {
         style={{width: '268px',background: 'rgba(0,0,0,0.22)',backdropFilter: 'blur(52px)',WebkitBackdropFilter: 'blur(52px)',borderRight: '1px solid rgba(255,255,255,0.06)',
         }}
       >
-        <div className=" pt-6 " style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-          <Link href="/" className="flex items-center gap-2 mb-4">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/echoo.png" alt="Echoo" className="absolute w-25 h-25 rounded-lg object-contain" />
-          </Link>
-         
+        {/* Section switcher */}
+        <div className="px-3 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <div className="flex gap-1">
+            {([
+              { key: 'posts', label: `Posts (${displayPosts.length || postIds.length})` },
+              { key: 'sessions', label: 'History' },
+              { key: 'accounts', label: 'Accounts' },
+            ] as const).map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setSidebarSection(key)}
+                className="flex-1 py-1.5 rounded-lg text-[10px] font-medium transition-all"
+                style={{
+                  background: sidebarSection === key ? 'rgba(255,255,255,0.09)' : 'transparent',
+                  color: sidebarSection === key ? 'rgba(255,255,255,0.82)' : 'rgba(255,255,255,0.32)',
+                  border: sidebarSection === key ? '1px solid rgba(255,255,255,0.10)' : '1px solid transparent',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* Post list */}
-        <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2" style={{ scrollbarWidth: 'none' } as React.CSSProperties}>
-          {(displayPosts.length > 0 ? displayPosts : postIds.map((id, i) => ({ id, caption: null, media_url: null, comment_count: 0, _placeholder: true, _index: i }))).map((post, i) => {
-            const isPlaceholder = !('comment_count' in post) || (displayPosts.length === 0)
-            const idx = displayPosts.length > 0 ? i : (post as { _index?: number })._index ?? i
-            return (
-              <div
-                key={post.id}
-                className="flex items-center gap-2.5 rounded-xl p-2.5"
-                style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}
-              >
-                {!isPlaceholder && (post as SidebarPost).media_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={(post as SidebarPost).media_url!}
-                    alt=""
-                    className="w-10 h-10 rounded-lg shrink-0 object-cover"
-                  />
-                ) : (
+        {/* Posts section */}
+        {sidebarSection === 'posts' && (
+          <>
+            <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2" style={{ scrollbarWidth: 'none' } as React.CSSProperties}>
+              {(displayPosts.length > 0 ? displayPosts : postIds.map((id, i) => ({ id, caption: null, media_url: null, comment_count: 0, _placeholder: true, _index: i }))).map((post, i) => {
+                const isPlaceholder = !('comment_count' in post) || (displayPosts.length === 0)
+                const idx = displayPosts.length > 0 ? i : (post as { _index?: number })._index ?? i
+                return (
                   <div
-                    className="w-10 h-10 rounded-lg shrink-0"
-                    style={{ background: `linear-gradient(135deg, ${GRADIENTS[idx % GRADIENTS.length][0]} 0%, ${GRADIENTS[idx % GRADIENTS.length][1]} 100%)` }}
-                  />
-                )}
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs text-white leading-snug line-clamp-2" style={{ opacity: 0.75 }}>
-                    {isPlaceholder ? `Post ${idx + 1}` : ((post as SidebarPost).caption ?? 'No caption')}
-                  </p>
-                  {!isPlaceholder && (
-                    <p className="text-xs mt-0.5" style={{ color: 'rgba(255,255,255,0.28)' }}>
-                      {(post as SidebarPost).comment_count} comments
+                    key={post.id}
+                    className="flex items-center gap-2.5 rounded-xl p-2.5"
+                    style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}
+                  >
+                    {!isPlaceholder && (post as SidebarPost).media_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={(post as SidebarPost).media_url!}
+                        alt=""
+                        className="w-10 h-10 rounded-lg shrink-0 object-cover"
+                      />
+                    ) : (
+                      <div
+                        className="w-10 h-10 rounded-lg shrink-0"
+                        style={{ background: `linear-gradient(135deg, ${GRADIENTS[idx % GRADIENTS.length][0]} 0%, ${GRADIENTS[idx % GRADIENTS.length][1]} 100%)` }}
+                      />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-white leading-snug line-clamp-2" style={{ opacity: 0.75 }}>
+                        {isPlaceholder ? `Post ${idx + 1}` : ((post as SidebarPost).caption ?? 'No caption')}
+                      </p>
+                      {!isPlaceholder && (
+                        <p className="text-xs mt-0.5" style={{ color: 'rgba(255,255,255,0.28)' }}>
+                          {(post as SidebarPost).comment_count} comments
+                        </p>
+                      )}
+                    </div>
+                    {!isPlaceholder && (() => {
+                      const dbId = (post as SidebarPost).id
+                      const syncing = syncingPosts.has(dbId)
+                      const synced = syncedPosts.has(dbId)
+                      return (
+                        <button
+                          onClick={() => syncPost(dbId)}
+                          disabled={syncing}
+                          className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg transition-all"
+                          style={{
+                            background: synced ? 'rgba(120,210,85,0.10)' : 'rgba(255,255,255,0.05)',
+                            border: `1px solid ${synced ? 'rgba(120,210,85,0.28)' : 'rgba(255,255,255,0.08)'}`,
+                            color: synced ? 'rgba(120,210,85,0.85)' : 'rgba(255,255,255,0.38)',
+                          }}
+                        >
+                          {synced ? (
+                            <>
+                              <svg width="8" height="8" viewBox="0 0 9 9" fill="none">
+                                <path d="M1.5 4.5L3.5 6.5L7.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                              <span style={{ fontSize: '10px' }}>Synced</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg width="9" height="9" viewBox="0 0 10 10" fill="none" className={syncing ? 'animate-spin' : ''}>
+                                <path d="M9 5A4 4 0 1 1 5 1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                                <path d="M5 1l1.5 1.5L5 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                              <span style={{ fontSize: '10px' }}>{syncing ? 'Syncing…' : 'Sync'}</span>
+                            </>
+                          )}
+                        </button>
+                      )
+                    })()}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="p-3 shrink-0" style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <Link
+                href="/posts"
+                className="btn-ghost flex items-center justify-center gap-2 w-full py-2 rounded-xl text-xs"
+              >
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                  <path d="M5.5 1v9M1 5.5h9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
+                Add more posts
+              </Link>
+            </div>
+          </>
+        )}
+
+        {/* Sessions / History section */}
+        {sidebarSection === 'sessions' && (
+          <>
+            <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-1.5" style={{ scrollbarWidth: 'none' } as React.CSSProperties}>
+              {sessions.length === 0 ? (
+                <p className="text-xs text-center py-8" style={{ color: 'rgba(255,255,255,0.25)' }}>No sessions yet</p>
+              ) : sessions.map(session => {
+                const isCurrent = session.id === conversationIdRef.current
+                return (
+                  <button
+                    key={session.id}
+                    onClick={() => openSession(session)}
+                    className="w-full text-left rounded-xl px-3 py-2.5 transition-all"
+                    style={{
+                      background: isCurrent ? 'rgba(205,138,18,0.08)' : 'rgba(255,255,255,0.03)',
+                      border: `1px solid ${isCurrent ? 'rgba(205,138,18,0.25)' : 'rgba(255,255,255,0.06)'}`,
+                    }}
+                  >
+                    <p className="text-xs leading-snug line-clamp-2" style={{ color: 'rgba(255,255,255,0.70)' }}>
+                      {session.title}
                     </p>
-                  )}
-                </div>
-                {!isPlaceholder && (() => {
-                  const igId = (post as SidebarPost).instagram_post_id
-                  const syncing = syncingPosts.has(igId)
-                  const synced = syncedPosts.has(igId)
-                  return (
-                    <button
-                      onClick={() => syncPost(igId)}
-                      disabled={syncing}
-                      className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg transition-all"
+                    <p className="text-[10px] mt-1" style={{ color: 'rgba(255,255,255,0.25)' }}>
+                      {timeAgo(session.created_at)}
+                    </p>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="p-3 shrink-0" style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <button
+                onClick={newChat}
+                className="btn-ghost flex items-center justify-center gap-2 w-full py-2 rounded-xl text-xs"
+              >
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                  <path d="M5.5 1v9M1 5.5h9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
+                New chat
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Accounts section */}
+        {sidebarSection === 'accounts' && (
+          <>
+            <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2" style={{ scrollbarWidth: 'none' } as React.CSSProperties}>
+              {(user.connected_accounts ?? []).map(account => {
+                const isIg = account.platform === 'instagram'
+                const name = isIg ? `@${account.instagram_username ?? ''}` : (account.youtube_channel_name ?? 'YouTube')
+                return (
+                  <div
+                    key={account.id}
+                    className="flex items-center gap-2.5 rounded-xl p-2.5"
+                    style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}
+                  >
+                    {/* Platform icon */}
+                    <div
+                      className="w-8 h-8 rounded-lg shrink-0 flex items-center justify-center"
                       style={{
-                        background: synced ? 'rgba(120,210,85,0.10)' : 'rgba(255,255,255,0.05)',
-                        border: `1px solid ${synced ? 'rgba(120,210,85,0.28)' : 'rgba(255,255,255,0.08)'}`,
-                        color: synced ? 'rgba(120,210,85,0.85)' : 'rgba(255,255,255,0.38)',
+                        background: isIg
+                          ? 'linear-gradient(135deg, #833ab4 0%, #fd1d1d 50%, #fcb045 100%)'
+                          : 'rgba(220,0,0,0.80)',
                       }}
                     >
-                      {synced ? (
-                        <>
-                          <svg width="8" height="8" viewBox="0 0 9 9" fill="none">
-                            <path d="M1.5 4.5L3.5 6.5L7.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                          <span style={{ fontSize: '10px' }}>Synced</span>
-                        </>
+                      {isIg ? (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                          <rect x="2" y="2" width="20" height="20" rx="5" stroke="white" strokeWidth="1.8" />
+                          <circle cx="12" cy="12" r="4.5" stroke="white" strokeWidth="1.8" />
+                          <circle cx="17.5" cy="6.5" r="1.2" fill="white" />
+                        </svg>
                       ) : (
-                        <>
-                          <svg width="9" height="9" viewBox="0 0 10 10" fill="none" className={syncing ? 'animate-spin' : ''}>
-                            <path d="M9 5A4 4 0 1 1 5 1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                            <path d="M5 1l1.5 1.5L5 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                          <span style={{ fontSize: '10px' }}>{syncing ? 'Syncing…' : 'Sync'}</span>
-                        </>
+                        <svg width="16" height="11" viewBox="0 0 24 17" fill="none">
+                          <rect x="0.5" y="0.5" width="23" height="16" rx="4.5" fill="white" fillOpacity="0.15" />
+                          <path d="M9.5 5L16.5 8.5L9.5 12V5Z" fill="white" />
+                        </svg>
                       )}
-                    </button>
-                  )
-                })()}
-              </div>
-            )
-          })}
-        </div>
-
-        <div className="p-3" style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-          <Link
-            href="/posts"
-            className="btn-ghost flex items-center justify-center gap-2 w-full py-2 rounded-xl text-xs"
-          >
-            <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-              <path d="M5.5 1v9M1 5.5h9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-            </svg>
-            Add more posts
-          </Link>
-        </div>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-white font-medium truncate" style={{ opacity: 0.82 }}>{name}</p>
+                      <p className="text-[10px] mt-0.5 capitalize" style={{ color: 'rgba(255,255,255,0.30)' }}>
+                        {account.platform}
+                      </p>
+                    </div>
+                    <div
+                      className="w-1.5 h-1.5 rounded-full shrink-0"
+                      style={{ background: 'rgba(120,210,85,0.85)' }}
+                      title="Connected"
+                    />
+                  </div>
+                )
+              })}
+            </div>
+            <div className="p-3 shrink-0" style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <Link
+                href="/connect"
+                className="btn-ghost flex items-center justify-center gap-2 w-full py-2 rounded-xl text-xs"
+              >
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                  <path d="M5.5 1v9M1 5.5h9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
+                Add account
+              </Link>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Main chat area */}
@@ -604,7 +822,7 @@ function ChatContent() {
             <div>
               <h2 className="text-white font-medium text-sm">Comment Intelligence</h2>
               <p className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>
-                Ask anything about your Instagram comments
+                Ask anything about your comments
               </p>
             </div>
           </div>
@@ -716,37 +934,37 @@ function ChatContent() {
                                 >
                                   <span style={{ color: 'rgba(205,138,18,0.65)' }}>@{s.username}</span>
                                   {' — '}{s.text}
-                                  {replySent[s.instagram_comment_id] ? (
+                                  {replySent[s.external_comment_id] ? (
                                     <p className="mt-1.5" style={{ color: 'rgba(120,210,85,0.7)' }}>✓ Reply sent</p>
-                                  ) : replyOpen[s.instagram_comment_id] ? (
+                                  ) : replyOpen[s.external_comment_id] ? (
                                     <div className="mt-1.5 flex items-center gap-1.5">
                                       <input
                                         autoFocus
                                         type="text"
-                                        value={replyText[s.instagram_comment_id] ?? ''}
-                                        onChange={e => setReplyText(prev => ({ ...prev, [s.instagram_comment_id]: e.target.value }))}
-                                        onKeyDown={e => { if (e.key === 'Enter') sendReply(s.instagram_comment_id) }}
+                                        value={replyText[s.external_comment_id] ?? ''}
+                                        onChange={e => setReplyText(prev => ({ ...prev, [s.external_comment_id]: e.target.value }))}
+                                        onKeyDown={e => { if (e.key === 'Enter') sendReply(s.external_comment_id) }}
                                         placeholder="Write a reply…"
-                                        disabled={replySending[s.instagram_comment_id]}
+                                        disabled={replySending[s.external_comment_id]}
                                         className="input-field flex-1"
                                         style={{ fontSize: '11px' }}
                                       />
                                       <button
-                                        onClick={() => sendReply(s.instagram_comment_id)}
-                                        disabled={replySending[s.instagram_comment_id] || !replyText[s.instagram_comment_id]?.trim()}
+                                        onClick={() => sendReply(s.external_comment_id)}
+                                        disabled={replySending[s.external_comment_id] || !replyText[s.external_comment_id]?.trim()}
                                         className="px-2.5 py-1 rounded-lg transition-all"
                                         style={{ background: 'rgba(205,138,18,0.18)', border: '1px solid rgba(205,138,18,0.32)', color: 'rgba(205,138,18,0.9)', fontSize: '11px' }}
                                       >
-                                        {replySending[s.instagram_comment_id] ? '…' : 'Send'}
+                                        {replySending[s.external_comment_id] ? '…' : 'Send'}
                                       </button>
                                       <button
-                                        onClick={() => setReplyOpen(prev => ({ ...prev, [s.instagram_comment_id]: false }))}
+                                        onClick={() => setReplyOpen(prev => ({ ...prev, [s.external_comment_id]: false }))}
                                         style={{ color: 'rgba(255,255,255,0.28)', fontSize: '11px' }}
                                       >✕</button>
                                     </div>
                                   ) : (
                                     <button
-                                      onClick={() => setReplyOpen(prev => ({ ...prev, [s.instagram_comment_id]: true }))}
+                                      onClick={() => setReplyOpen(prev => ({ ...prev, [s.external_comment_id]: true }))}
                                       className="mt-1.5 block transition-colors"
                                       style={{ color: 'rgba(255,255,255,0.28)', fontSize: '11px' }}
                                     >↩ Reply</button>
@@ -777,37 +995,37 @@ function ChatContent() {
                             <span className="text-xs" style={{ color: 'rgba(255,255,255,0.22)' }}>{timeAgo(s.posted_at)}</span>
                           </div>
                           <p className="text-xs leading-relaxed line-clamp-4" style={{ color: 'rgba(255,255,255,0.65)' }}>{s.text}</p>
-                          {replySent[s.instagram_comment_id] ? (
+                          {replySent[s.external_comment_id] ? (
                             <p className="text-xs" style={{ color: 'rgba(120,210,85,0.7)' }}>✓ Reply sent</p>
-                          ) : replyOpen[s.instagram_comment_id] ? (
+                          ) : replyOpen[s.external_comment_id] ? (
                             <div className="flex items-center gap-1.5">
                               <input
                                 autoFocus
                                 type="text"
-                                value={replyText[s.instagram_comment_id] ?? ''}
-                                onChange={e => setReplyText(prev => ({ ...prev, [s.instagram_comment_id]: e.target.value }))}
-                                onKeyDown={e => { if (e.key === 'Enter') sendReply(s.instagram_comment_id) }}
+                                value={replyText[s.external_comment_id] ?? ''}
+                                onChange={e => setReplyText(prev => ({ ...prev, [s.external_comment_id]: e.target.value }))}
+                                onKeyDown={e => { if (e.key === 'Enter') sendReply(s.external_comment_id) }}
                                 placeholder="Reply…"
-                                disabled={replySending[s.instagram_comment_id]}
+                                disabled={replySending[s.external_comment_id]}
                                 className="input-field flex-1"
                                 style={{ fontSize: '11px' }}
                               />
                               <button
-                                onClick={() => sendReply(s.instagram_comment_id)}
-                                disabled={replySending[s.instagram_comment_id] || !replyText[s.instagram_comment_id]?.trim()}
+                                onClick={() => sendReply(s.external_comment_id)}
+                                disabled={replySending[s.external_comment_id] || !replyText[s.external_comment_id]?.trim()}
                                 className="px-2 py-1 rounded-lg transition-all"
                                 style={{ background: 'rgba(205,138,18,0.18)', border: '1px solid rgba(205,138,18,0.32)', color: 'rgba(205,138,18,0.9)', fontSize: '11px' }}
                               >
-                                {replySending[s.instagram_comment_id] ? '…' : 'Send'}
+                                {replySending[s.external_comment_id] ? '…' : 'Send'}
                               </button>
                               <button
-                                onClick={() => setReplyOpen(prev => ({ ...prev, [s.instagram_comment_id]: false }))}
+                                onClick={() => setReplyOpen(prev => ({ ...prev, [s.external_comment_id]: false }))}
                                 style={{ color: 'rgba(255,255,255,0.28)', fontSize: '11px' }}
                               >✕</button>
                             </div>
                           ) : (
                             <button
-                              onClick={() => setReplyOpen(prev => ({ ...prev, [s.instagram_comment_id]: true }))}
+                              onClick={() => setReplyOpen(prev => ({ ...prev, [s.external_comment_id]: true }))}
                               className="text-left text-xs transition-colors w-fit"
                               style={{ color: 'rgba(255,255,255,0.28)' }}
                             >↩ Reply</button>
@@ -879,56 +1097,24 @@ function ChatContent() {
                     <path d="M5.5 1v9M1 5.5h9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
                   </svg>
                 </Link>
-                <div className="relative" ref={modeMenuRef}>
-                  <button
-                    onClick={() => setModeMenuOpen(v => !v)}
-                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all"
-                    style={{
-                      background: modeMenuOpen ? 'rgba(205,138,18,0.10)' : 'rgba(255,255,255,0.06)',
-                      border: `1px solid ${modeMenuOpen ? 'rgba(205,138,18,0.30)' : 'rgba(255,255,255,0.10)'}`,
-                      color: 'rgba(205,138,18,0.9)',
-                    }}
-                  >
-                    {mode === 'analysis' ? 'Analysis' : 'Listing'}
-                    <svg
-                      width="8" height="5" viewBox="0 0 8 5" fill="none"
-                      style={{ transform: modeMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}
-                    >
-                      <path d="M1 1l3 3 3-3" stroke="rgba(205,138,18,0.6)" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </button>
-                  {modeMenuOpen && (
-                    <div
-                      className="absolute bottom-full mb-2 left-0 rounded-xl overflow-hidden"
+                <div
+                  className="flex items-center rounded-lg p-0.5"
+                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)' }}
+                >
+                  {(['analysis', 'listing'] as Mode[]).map(m => (
+                    <button
+                      key={m}
+                      onClick={() => setMode(m)}
+                      className="text-xs px-3 py-1 rounded-md transition-all"
                       style={{
-                        background: 'rgba(16,16,20,0.98)',
-                        border: '1px solid rgba(255,255,255,0.09)',
-                        backdropFilter: 'blur(24px)',
-                        WebkitBackdropFilter: 'blur(24px)',
-                        boxShadow: '0 8px 32px rgba(0,0,0,0.55)',
-                        minWidth: '110px',
+                        background: mode === m ? 'rgba(205,138,18,0.18)' : 'transparent',
+                        border: mode === m ? '1px solid rgba(205,138,18,0.35)' : '1px solid transparent',
+                        color: mode === m ? 'rgba(205,138,18,0.95)' : 'rgba(255,255,255,0.38)',
                       }}
                     >
-                      {(['analysis', 'listing'] as Mode[]).map(m => (
-                        <button
-                          key={m}
-                          onClick={() => { setMode(m); setModeMenuOpen(false) }}
-                          className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition-all"
-                          style={{
-                            fontSize: '12px',
-                            color: mode === m ? 'rgba(205,138,18,0.95)' : 'rgba(255,255,255,0.5)',
-                            background: mode === m ? 'rgba(205,138,18,0.08)' : 'transparent',
-                          }}
-                        >
-                          <span
-                            className="w-1.5 h-1.5 rounded-full shrink-0"
-                            style={{ background: mode === m ? 'rgba(205,138,18,0.9)' : 'rgba(255,255,255,0.18)' }}
-                          />
-                          {m === 'analysis' ? 'Analysis' : 'Listing'}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                      {m === 'analysis' ? 'Analysis' : 'Listing'}
+                    </button>
+                  ))}
                 </div>
                 <span className="text-xs" style={{ color: 'rgba(255,255,255,0.22)' }}>
                   {postIds.length} post{postIds.length !== 1 ? 's' : ''} selected

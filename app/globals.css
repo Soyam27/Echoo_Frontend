@@ -16,7 +16,7 @@ body {
   background: #0e0e0e;
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
-  overflow: hidden;
+  overflow-x: hidden;
 }
 
 /* Hide all scrollbars while keeping scroll functionality */

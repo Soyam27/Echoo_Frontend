@@ -1,46 +1,48 @@
 'use client'
 
-import { Suspense, useState } from "react";
-import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useAuth } from "../../../context/auth-context";
-import { api } from "../../../lib/api";
+import { Suspense, useState } from "react"
+import Link from "next/link"
+import { useRouter, useSearchParams } from "next/navigation"
+import { useAuth } from "../../../context/auth-context"
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 function OAuthContent() {
-  const { user, refreshUser } = useAuth();
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const q = searchParams.get("q") ?? "";
+  const { user, refreshUser } = useAuth()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const q = searchParams.get("q") ?? ""
 
-  const [connecting, setConnecting] = useState(false);
-  const [error, setError] = useState("");
+  const [connecting, setConnecting] = useState(false)
+  const [error, setError] = useState("")
 
   async function handleConnect() {
-    if (!user) return;
-    setError("");
-    setConnecting(true);
+    if (!user) return
+    setError("")
+    setConnecting(true)
     try {
-      const res = await api.get<{ url: string }>('/instagram/connect');
-      window.location.href = res.url;
+      const res = await fetch(`${API_BASE}/youtube/connect`, { credentials: 'include' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || "Failed to connect YouTube")
+      window.location.href = data.url
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to connect Instagram");
-      setConnecting(false);
+      setError(err instanceof Error ? err.message : "Failed to connect YouTube")
+      setConnecting(false)
     }
   }
 
   async function handleSkip() {
-    await refreshUser();
-    router.push(q ? `/posts?q=${encodeURIComponent(q)}` : "/posts");
+    await refreshUser()
+    router.push(q ? `/posts?q=${encodeURIComponent(q)}` : "/posts")
   }
 
   function handleContinue() {
-    router.push(q ? `/posts?q=${encodeURIComponent(q)}` : "/posts");
+    router.push(q ? `/posts?q=${encodeURIComponent(q)}` : "/posts")
   }
 
   return (
     <main className="flex flex-1 items-center justify-center px-4 py-12" style={{ position: "relative" }}>
       <div style={{ position: "fixed", inset: 0, background: "#0e0e0e", zIndex: -1 }} />
-      {/* Navbar */}
       <div className="absolute top-0 left-0 right-0 flex items-center px-8 py-5">
         <Link href="/" className="flex items-center gap-2.5">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -48,7 +50,6 @@ function OAuthContent() {
         </Link>
       </div>
 
-      {/* Card */}
       <div
         className="glass-card w-full"
         style={{
@@ -58,8 +59,7 @@ function OAuthContent() {
           boxShadow: "0 24px 64px rgba(0,0,0,0.55)",
         }}
       >
-        {/* Already connected state */}
-        {user?.connected_accounts?.some(a => a.platform === 'instagram') && (
+        {user?.connected_accounts?.some(a => a.platform === 'youtube') && (
           <div
             className="flex items-center gap-2 px-4 py-3 rounded-xl mb-5"
             style={{
@@ -69,16 +69,15 @@ function OAuthContent() {
           >
             <div className="w-2 h-2 rounded-full shrink-0" style={{ background: "rgba(100,220,100,0.9)" }} />
             <p className="text-sm" style={{ color: "rgba(120,230,120,0.9)" }}>
-              Connected as <strong>@{user?.connected_accounts?.find(a => a.platform === 'instagram')?.instagram_username}</strong>
+              Connected as <strong>{user?.connected_accounts?.find(a => a.platform === 'youtube')?.youtube_channel_name}</strong>
             </p>
           </div>
         )}
 
-        {/* Logos connection row */}
+        {/* Logos row */}
         <div className="flex items-center justify-center gap-4 mb-7">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/echoo.png" alt="Echoo" className="w-12 h-12 rounded-xl object-contain shrink-0" />
-
           <div className="flex items-center gap-1">
             {[0, 1, 2].map((i) => (
               <div
@@ -87,34 +86,28 @@ function OAuthContent() {
                 style={{
                   width: i === 1 ? "5px" : "3px",
                   height: i === 1 ? "5px" : "3px",
-                  background: i === 1 ? "rgba(205,138,18,0.7)" : "rgba(255,255,255,0.2)",
+                  background: i === 1 ? "rgba(255,0,0,0.7)" : "rgba(255,255,255,0.2)",
                 }}
               />
             ))}
           </div>
-
           <div
             className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0"
-            style={{
-              background: "linear-gradient(135deg, #833ab4 0%, #fd1d1d 50%, #fcb045 100%)",
-              border: "1px solid rgba(255,255,255,0.12)",
-            }}
+            style={{ background: "rgba(255,0,0,0.15)", border: "1px solid rgba(255,0,0,0.28)" }}
           >
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-              <rect x="2" y="2" width="20" height="20" rx="5" stroke="white" strokeWidth="1.8" />
-              <circle cx="12" cy="12" r="4.5" stroke="white" strokeWidth="1.8" />
-              <circle cx="17.5" cy="6.5" r="1.2" fill="white" />
+            <svg width="24" height="18" viewBox="0 0 24 17" fill="none">
+              <rect x="0.5" y="0.5" width="23" height="16" rx="4.5" fill="#FF0000" stroke="rgba(255,255,255,0.15)" />
+              <path d="M9.5 5L16.5 8.5L9.5 12V5Z" fill="white" />
             </svg>
           </div>
         </div>
 
-        {/* Header */}
         <div className="text-center mb-7">
           <h1 className="text-white font-semibold mb-2" style={{ fontSize: "20px", letterSpacing: "-0.02em" }}>
-            Connect Instagram
+            Connect YouTube
           </h1>
           <p className="text-sm" style={{ color: "rgba(255,255,255,0.35)" }}>
-            Echoo needs access to your Instagram account to analyze post comments and generate insights.
+            Echoo needs access to your YouTube channel to analyze video comments and generate insights.
           </p>
         </div>
 
@@ -124,9 +117,9 @@ function OAuthContent() {
           style={{ border: "1px solid rgba(255,255,255,0.07)" }}
         >
           {[
-            { icon: "📸", label: "View your posts", desc: "Read captions and media" },
-            { icon: "💬", label: "Read comments", desc: "Access comment threads" },
-            { icon: "👤", label: "Basic profile info", desc: "Username and profile picture" },
+            { icon: "🎬", label: "View your videos", desc: "Read titles and thumbnails" },
+            { icon: "💬", label: "Read comments", desc: "Access top-level comment threads" },
+            { icon: "👤", label: "Basic channel info", desc: "Channel name and ID" },
           ].map((item, i) => (
             <div
               key={i}
@@ -166,9 +159,8 @@ function OAuthContent() {
           </div>
         )}
 
-        {/* Actions */}
         <div className="flex flex-col gap-2.5">
-          {user?.connected_accounts?.some(a => a.platform === 'instagram') ? (
+          {user?.connected_accounts?.some(a => a.platform === 'youtube') ? (
             <button
               onClick={handleContinue}
               className="flex items-center justify-center gap-2.5 w-full py-3 rounded-xl text-sm font-medium text-white transition-all btn-gold"
@@ -181,11 +173,9 @@ function OAuthContent() {
               disabled={connecting}
               className="flex items-center justify-center gap-2.5 w-full py-3 rounded-xl text-sm font-medium text-white transition-all"
               style={{
-                background: connecting
-                  ? "rgba(130,50,160,0.5)"
-                  : "linear-gradient(135deg, #833ab4 0%, #fd1d1d 55%, #fcb045 100%)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                boxShadow: "0 4px 20px rgba(130,50,160,0.25)",
+                background: connecting ? "rgba(180,0,0,0.4)" : "rgba(220,0,0,0.85)",
+                border: "1px solid rgba(255,50,50,0.25)",
+                boxShadow: "0 4px 20px rgba(220,0,0,0.22)",
                 opacity: connecting ? 0.8 : 1,
               }}
             >
@@ -198,12 +188,11 @@ function OAuthContent() {
                 </>
               ) : (
                 <>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                    <rect x="2" y="2" width="20" height="20" rx="5" stroke="white" strokeWidth="1.8" />
-                    <circle cx="12" cy="12" r="4.5" stroke="white" strokeWidth="1.8" />
-                    <circle cx="17.5" cy="6.5" r="1.2" fill="white" />
+                  <svg width="16" height="12" viewBox="0 0 24 17" fill="none">
+                    <rect x="0.5" y="0.5" width="23" height="16" rx="4.5" fill="#FF0000" />
+                    <path d="M9.5 5L16.5 8.5L9.5 12V5Z" fill="white" />
                   </svg>
-                  Connect with Instagram
+                  Connect with YouTube
                 </>
               )}
             </button>
@@ -218,14 +207,14 @@ function OAuthContent() {
         </div>
 
         <p className="text-center text-xs mt-4" style={{ color: "rgba(255,255,255,0.20)" }}>
-          We never post on your behalf or access DMs
+          We never post on your behalf or access private messages
         </p>
       </div>
     </main>
-  );
+  )
 }
 
-export default function InstagramOAuthPage() {
+export default function YouTubeOAuthPage() {
   return (
     <Suspense fallback={
       <div className="flex h-screen items-center justify-center" style={{ background: "#0e0e0e" }}>
@@ -234,5 +223,5 @@ export default function InstagramOAuthPage() {
     }>
       <OAuthContent />
     </Suspense>
-  );
+  )
 }

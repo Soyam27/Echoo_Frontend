@@ -10,11 +10,19 @@ import {
 } from 'react'
 import { api } from '../lib/api'
 
+export interface ConnectedAccount {
+  id: string
+  platform: 'instagram' | 'youtube'
+  instagram_id: string | null
+  instagram_username: string | null
+  youtube_channel_id: string | null
+  youtube_channel_name: string | null
+}
+
 export interface AuthUser {
   id: string
   email: string
-  instagram_username: string | null
-  instagram_id: string | null
+  connected_accounts: ConnectedAccount[]
   created_at: string
 }
 
@@ -29,22 +37,25 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null)
 
-// Revalidate cached user data in background after this interval
-const REVALIDATE_AFTER_MS = 5 * 60 * 1000 // 5 minutes
+const REVALIDATE_AFTER_MS = 5 * 60 * 1000
 
-// ─── localStorage helpers (user data only — token lives in HttpOnly cookie) ───
+// ─── localStorage helpers ─────────────────────────────────────────────────────
 
 function readUserCache(): { user: AuthUser; ts: number } | null {
   try {
     const raw = localStorage.getItem('echoo_user')
     if (!raw) return null
-    return { user: JSON.parse(raw), ts: Number(localStorage.getItem('echoo_user_ts') || '0') }
+    const data = JSON.parse(raw)
+    // Invalidate old cache format (before connected_accounts was added)
+    if (!Array.isArray(data.connected_accounts)) return null
+    return { user: data as AuthUser, ts: Number(localStorage.getItem('echoo_user_ts') || '0') }
   } catch {
     return null
   }
 }
 
 function writeUserCache(u: AuthUser) {
+  localStorage.setItem('echoo_session', '1')  // restore if localStorage was cleared
   localStorage.setItem('echoo_user', JSON.stringify(u))
   localStorage.setItem('echoo_user_ts', Date.now().toString())
 }
@@ -58,16 +69,8 @@ function clearUserCache() {
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(() => {
-    if (typeof window === 'undefined') return null
-    return readUserCache()?.user ?? null
-  })
-  const [isLoading, setIsLoading] = useState(() => {
-    if (typeof window === 'undefined') return true
-    const hasSession = !!localStorage.getItem('echoo_session')
-    if (!hasSession) return false
-    return !readUserCache() // only loading if session exists but no cached user
-  })
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
 
   const clearAuth = useCallback(() => {
     clearUserCache()
@@ -85,35 +88,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [clearAuth])
 
   useEffect(() => {
-    // echoo_session is a non-sensitive flag — it just tells us whether to
-    // bother hitting the server. The real auth token is in an HttpOnly cookie.
-    const hasSession = !!localStorage.getItem('echoo_session')
-    if (!hasSession) {
-      setIsLoading(false)
-      return
-    }
-
     const cached = readUserCache()
-    if (cached) {
-      // Serve cache immediately — no network delay, no loading flash
+
+    if (cached && localStorage.getItem('echoo_session')) {
+      // Fast path: serve from cache immediately, revalidate in background if stale
       setUser(cached.user)
       setIsLoading(false)
-
-      const isStale = Date.now() - cached.ts > REVALIDATE_AFTER_MS
-      if (isStale) {
-        // Stamp BEFORE the async call so React StrictMode's double-invoke
-        // sees a fresh timestamp on its second run and skips a duplicate fetch
-        localStorage.setItem('echoo_user_ts', Date.now().toString())
-        fetchUser() // background revalidation — non-blocking
+      if (Date.now() - cached.ts > REVALIDATE_AFTER_MS) {
+        fetchUser()
       }
     } else {
-      // Session flag exists but no cached user — must fetch
+      // Cache missing or localStorage was cleared — verify with the cookie.
+      // fetchUser() succeeds  → repopulates localStorage, user stays logged in.
+      // fetchUser() fails 401 → clearAuth() runs, user is logged out.
       fetchUser().finally(() => setIsLoading(false))
     }
   }, [fetchUser])
 
   const login = async (email: string, password: string) => {
-    // Backend sets HttpOnly echoo_token cookie; we just need the user data
     await api.post('/auth/login', { email, password })
     localStorage.setItem('echoo_session', '1')
     await fetchUser()
@@ -126,15 +118,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const logout = async () => {
-    clearAuth() // clear frontend state immediately
-    await api.post('/auth/logout', {}).catch(() => {
-      // best-effort — cookie will expire naturally if this fails
-    })
+    clearAuth()
+    await api.post('/auth/logout', {}).catch(() => {})
   }
 
   const refreshUser = useCallback(async () => {
-    // Stamp first to prevent the background-revalidation branch from
-    // firing a duplicate call if this runs within the stale window
     localStorage.setItem('echoo_user_ts', Date.now().toString())
     await fetchUser()
   }, [fetchUser])

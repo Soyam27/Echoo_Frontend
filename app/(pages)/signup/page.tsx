@@ -1,13 +1,15 @@
 'use client'
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "../../context/auth-context";
 
-export default function SignupPage() {
+function SignupForm() {
   const { register, user, isLoading } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const redirectTo = searchParams.get("redirect") || null;
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -16,9 +18,9 @@ export default function SignupPage() {
 
   useEffect(() => {
     if (!isLoading && user) {
-      router.replace("/oauth/instagram");
+      router.replace(redirectTo || ((user.connected_accounts?.length ?? 0) > 0 ? "/posts" : "/connect"));
     }
-  }, [user, isLoading, router]);
+  }, [user, isLoading, router, redirectTo]);
 
   async function handleSubmit(e: React.SyntheticEvent) {
     e.preventDefault();
@@ -173,4 +175,8 @@ export default function SignupPage() {
       </div>
     </main>
   );
+}
+
+export default function SignupPage() {
+  return <Suspense><SignupForm /></Suspense>;
 }

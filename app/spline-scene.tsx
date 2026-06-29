@@ -1,11 +1,18 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import dynamic from 'next/dynamic'
 
 const Spline = dynamic(() => import('@splinetool/react-spline'), { ssr: false })
 
 export default function SplineScene() {
   const [loaded, setLoaded] = useState(false)
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null)
+
+  useEffect(() => {
+    setSize({ w: window.innerWidth, h: window.innerHeight })
+  }, [])
+
+  if (!size) return null
 
   return (
     <div
@@ -13,8 +20,8 @@ export default function SplineScene() {
         position: 'absolute',
         top: '50%',
         left: '45%',
-        width: '150vw',
-        height: '150vh',
+        width: size.w * 1.5,
+        height: size.h * 1.5,
         transform: 'translate(-50%, -50%) scale(1.5)',
         transformOrigin: 'center center',
         opacity: loaded ? 1 : 0,
