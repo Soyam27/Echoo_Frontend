@@ -130,6 +130,19 @@ function stripMeta(text: string): string {
   return text.replace(/\n?USED:[0-9,\s]+$/i, '').trimEnd()
 }
 
+function parseApiMessage(m: { role: string; content: string }): Message {
+  if (m.role === 'assistant') {
+    try {
+      const p = JSON.parse(m.content)
+      if (p && p._listing === true) {
+        return { role: 'ai', text: '', isListing: true, sources: p.sources ?? [] }
+      }
+    } catch {}
+    return { role: 'ai', text: m.content }
+  }
+  return { role: 'user', text: m.content }
+}
+
 function ChatContent() {
   const { user, isLoading } = useAuth()
   const searchParams = useSearchParams()
@@ -227,19 +240,31 @@ function ChatContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  // When navigating from home history: load existing conversation messages on mount
+  // When navigating from home history or refreshing: restore messages (cache-first)
   useEffect(() => {
     const convId = searchParams.get('conversation_id')
     if (!convId) return
-    setMessagesLoading(true)
+    // Check per-session localStorage cache first — instant restore, no flash
+    try {
+      const cached = localStorage.getItem(`echoo_chat_messages_${convId}`)
+      if (cached) {
+        const parsed = JSON.parse(cached) as Message[]
+        if (parsed.length > 0) {
+          setMessages(parsed)
+          setMessagesLoading(false)
+          hasSentInitialRef.current = true
+          return
+        }
+      }
+    } catch {}
+    // Cache miss — fetch from server
     fetch(`${API_BASE}/chat/conversations/${convId}/messages`, { credentials: 'include' })
       .then(r => r.ok ? r.json() : Promise.reject())
       .then((msgs: { id: string; role: string; content: string }[]) => {
         if (msgs.length === 0) return
-        setMessages(msgs.map(m => ({
-          role: (m.role === 'assistant' ? 'ai' : 'user') as 'ai' | 'user',
-          text: m.content,
-        })))
+        const parsed = msgs.map(parseApiMessage)
+        setMessages(parsed)
+        try { localStorage.setItem(`echoo_chat_messages_${convId}`, JSON.stringify(parsed)) } catch {}
         hasSentInitialRef.current = true
       })
       .catch(() => {})
@@ -307,6 +332,14 @@ function ChatContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncingPosts.size, postsParam])
 
+  // Save current session messages to localStorage so refresh / session-switch is instant
+  useEffect(() => {
+    if (isStreaming) return
+    const convId = conversationIdRef.current
+    if (!convId || messages.length === 0) return
+    try { localStorage.setItem(`echoo_chat_messages_${convId}`, JSON.stringify(messages)) } catch {}
+  }, [messages, isStreaming])
+
   // Warn before refresh if AI is streaming or a reply is in flight / being typed
   useEffect(() => {
     const active =
@@ -358,6 +391,13 @@ function ChatContent() {
         }
         const data = await res.json()
         conversationIdRef.current = data.conversation_id
+        // Persist conversation_id in URL so refresh stays in this session
+        const listingParams = new URLSearchParams(window.location.search)
+        if (!listingParams.get('conversation_id')) {
+          listingParams.set('conversation_id', data.conversation_id)
+          router.replace(`/chat?${listingParams.toString()}`)
+        }
+        loadSessions()
         setMessages(prev => {
           const lastIdx = prev.length - 1
           const last = prev[lastIdx]
@@ -385,6 +425,12 @@ function ChatContent() {
           },
           (convId, sources) => {
             conversationIdRef.current = convId
+            // Persist conversation_id in URL so refresh stays in this session
+            const analysisParams = new URLSearchParams(window.location.search)
+            if (!analysisParams.get('conversation_id')) {
+              analysisParams.set('conversation_id', convId)
+              router.replace(`/chat?${analysisParams.toString()}`)
+            }
             setMessages(prev => {
               const lastIdx = prev.length - 1
               const last = prev[lastIdx]
@@ -497,15 +543,9 @@ function ChatContent() {
 
   async function openSession(session: { id: string; title: string; post_ids: string[]; created_at: string }) {
     if (isStreaming) return
-    setMessagesLoading(true)
-    try {
-      const r = await fetch(`${API_BASE}/chat/conversations/${session.id}/messages`, { credentials: 'include' })
-      if (!r.ok) return
-      const msgs: { id: string; role: string; content: string }[] = await r.json()
-      setMessages(msgs.map(m => ({
-        role: (m.role === 'assistant' ? 'ai' : 'user') as 'ai' | 'user',
-        text: m.content,
-      })))
+
+    function applySession(parsed: Message[]) {
+      setMessages(parsed)
       setExpandedSources(new Set())
       setReplyOpen({})
       setReplyText({})
@@ -513,7 +553,6 @@ function ChatContent() {
       setReplySent({})
       conversationIdRef.current = session.id
       hasSentInitialRef.current = true
-      // Update sidebar posts from session's post_ids using cache (regular + external)
       if (session.post_ids.length > 0) {
         try {
           const allCached: SidebarPost[] = []
@@ -524,6 +563,29 @@ function ChatContent() {
         } catch {}
         router.replace(`/chat?posts=${session.post_ids.join(',')}&conversation_id=${session.id}`)
       }
+    }
+
+    // Check per-session cache first — avoids loading screen on session switch
+    try {
+      const cached = localStorage.getItem(`echoo_chat_messages_${session.id}`)
+      if (cached) {
+        const parsed = JSON.parse(cached) as Message[]
+        if (parsed.length > 0) {
+          applySession(parsed)
+          return
+        }
+      }
+    } catch {}
+
+    // Cache miss — fetch from server
+    setMessagesLoading(true)
+    try {
+      const r = await fetch(`${API_BASE}/chat/conversations/${session.id}/messages`, { credentials: 'include' })
+      if (!r.ok) return
+      const msgs: { id: string; role: string; content: string }[] = await r.json()
+      const parsed = msgs.map(parseApiMessage)
+      try { localStorage.setItem(`echoo_chat_messages_${session.id}`, JSON.stringify(parsed)) } catch {}
+      applySession(parsed)
     } catch {}
     finally { setMessagesLoading(false) }
   }

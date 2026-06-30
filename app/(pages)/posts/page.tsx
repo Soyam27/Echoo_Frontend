@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, Suspense } from "react"
+import { useState, useEffect, useRef, Suspense } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useAuth } from "../../context/auth-context"
@@ -98,6 +98,84 @@ function PostsContent() {
   const [authChecked, setAuthChecked] = useState(!justConnected)
   const [activeTab, setActiveTab] = useState<Tab>('')
 
+  // Persist active tab — only write non-empty values so we don't clobber saved state on mount
+  useEffect(() => {
+    if (!activeTab) return
+    try { localStorage.setItem('echoo_active_tab', activeTab) } catch {}
+  }, [activeTab])
+
+  // Link fetch state
+  const [linkInput, setLinkInput] = useState("")
+  const [linkFetching, setLinkFetching] = useState(false)
+  const [linkError, setLinkError] = useState("")
+  const linkPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  useEffect(() => () => { if (linkPollRef.current) clearInterval(linkPollRef.current) }, [])
+
+  async function handleFetchLink() {
+    const url = linkInput.trim()
+    if (!url || linkFetching) return
+    setLinkError("")
+    setLinkFetching(true)
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/links/analyze`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setLinkError(data.detail || "Failed to fetch link")
+        setLinkFetching(false)
+        return
+      }
+      const postId: string = data.post_id
+      function _onDone(statusData: PostResponse) {
+        setLinkFetching(false)
+        setLinkInput("")
+        setExternalPosts(prev => {
+          const next = prev.find(p => p.id === postId) ? prev : [statusData, ...prev]
+          try { localStorage.setItem("echoo_external_posts", JSON.stringify(next)) } catch {}
+          return next
+        })
+        setActiveTab("__others__")
+        setSelected(prev => new Set([...prev, postId]))
+      }
+      if (data.sync_status === "completed") {
+        _onDone(data as PostResponse)
+        return
+      }
+      let polls = 0
+      linkPollRef.current = setInterval(async () => {
+        if (++polls > 200) {
+          clearInterval(linkPollRef.current!); linkPollRef.current = null
+          setLinkError("Sync timed out — try again.")
+          setLinkFetching(false)
+          return
+        }
+        try {
+          const sr = await fetch(
+            `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/links/status/${postId}`,
+            { credentials: "include" }
+          )
+          const status: PostResponse & { sync_status: string } = await sr.json()
+          if (status.sync_status === "completed" || status.sync_status === "failed") {
+            clearInterval(linkPollRef.current!); linkPollRef.current = null
+            if (status.sync_status === "completed") {
+              _onDone(status)
+            } else {
+              setLinkError("Could not fetch comments for this link.")
+              setLinkFetching(false)
+            }
+          }
+        } catch {}
+      }, 3000)
+    } catch (err) {
+      setLinkError(err instanceof Error ? err.message : "Failed")
+      setLinkFetching(false)
+    }
+  }
+
   // Sync-before-navigate state
   const [syncing, setSyncing] = useState(false)
   const [syncChatUrl, setSyncChatUrl] = useState<string | null>(null)
@@ -122,7 +200,13 @@ function PostsContent() {
       return
     }
     // Default to first account; preserve tab if it's still valid
-    setActiveTab(prev => prev && accounts.find(a => a.id === prev) ? prev : accounts[0].id)
+    const savedTab = (() => { try { return localStorage.getItem('echoo_active_tab') || '' } catch { return '' } })()
+    setActiveTab(prev => {
+      const candidate = prev || savedTab
+      if (candidate === '__others__') return candidate
+      if (candidate && accounts.find(a => a.id === candidate)) return candidate
+      return accounts[0].id
+    })
   }, [hasMounted, user, isLoading, authChecked, router])
 
   useEffect(() => {
@@ -377,7 +461,7 @@ function PostsContent() {
 
       {/* Header */}
       <div className="px-4 sm:px-8 pt-6 pb-3 shrink-0">
-        <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-start justify-between gap-3">
           <div>
             <h1
               className="text-white font-semibold"
@@ -540,6 +624,62 @@ function PostsContent() {
             )}
           </div>
         )}
+
+        {/* Fetch from link — below tabs */}
+        <div className="mt-3" style={{ maxWidth: "420px" }}>
+          <div
+            className="flex items-center gap-2 px-3 py-2 rounded-xl"
+            style={{
+              background: "rgba(255,255,255,0.03)",
+              border: "1px solid rgba(255,255,255,0.08)",
+            }}
+          >
+            {linkInput.includes("instagram.com") ? (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0, color: "rgba(200,100,255,0.7)" }}>
+                <rect x="2" y="2" width="20" height="20" rx="5" stroke="currentColor" strokeWidth="2.2" />
+                <circle cx="12" cy="12" r="4.5" stroke="currentColor" strokeWidth="2.2" />
+                <circle cx="17.5" cy="6.5" r="1.3" fill="currentColor" />
+              </svg>
+            ) : (
+              <svg width="12" height="9" viewBox="0 0 24 17" fill="none" style={{ color: "rgba(255,80,80,0.6)", flexShrink: 0 }}>
+                <rect x="0.5" y="0.5" width="23" height="16" rx="4.5" fill="currentColor" fillOpacity="0.6" />
+                <path d="M9.5 5L16.5 8.5L9.5 12V5Z" fill="white" />
+              </svg>
+            )}
+            <input
+              type="text"
+              value={linkInput}
+              onChange={e => { setLinkInput(e.target.value); setLinkError("") }}
+              onKeyDown={e => e.key === "Enter" && handleFetchLink()}
+              placeholder="Paste an Instagram or YouTube URL…"
+              className="flex-1 bg-transparent outline-none text-xs"
+              style={{ color: "rgba(255,255,255,0.72)", caretColor: "rgba(255,255,255,0.7)" }}
+            />
+            <button
+              onClick={handleFetchLink}
+              disabled={!linkInput.trim() || linkFetching}
+              className="text-xs px-2.5 py-1 rounded-lg shrink-0 transition-all"
+              style={{
+                background: linkInput.trim() && !linkFetching ? "rgba(205,138,18,0.18)" : "rgba(255,255,255,0.04)",
+                border: linkInput.trim() && !linkFetching ? "1px solid rgba(205,138,18,0.32)" : "1px solid rgba(255,255,255,0.07)",
+                color: linkInput.trim() && !linkFetching ? "rgba(205,138,18,0.9)" : "rgba(255,255,255,0.22)",
+                cursor: linkInput.trim() && !linkFetching ? "pointer" : "default",
+              }}
+            >
+              {linkFetching ? (
+                <span className="flex items-center gap-1">
+                  <svg className="animate-spin" width="9" height="9" viewBox="0 0 10 10" fill="none">
+                    <circle cx="5" cy="5" r="4" stroke="currentColor" strokeWidth="1.5" strokeDasharray="6 6" />
+                  </svg>
+                  Fetching…
+                </span>
+              ) : "Fetch"}
+            </button>
+          </div>
+          {linkError && (
+            <p className="mt-1 text-xs px-1" style={{ color: "rgba(255,100,100,0.8)" }}>{linkError}</p>
+          )}
+        </div>
       </div>
 
       {/* Question banner */}
